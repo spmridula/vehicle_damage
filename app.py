@@ -1,10 +1,3 @@
-# app.py
-# Gradio interface: upload a car photo → get damage severity + Grad-CAM heatmap
-# This is what makes the model usable by insurance adjusters, not just data scientists.
-#
-# Run: python app.py
-# Opens at: http://127.0.0.1:7860
-
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")  # non-interactive backend for Gradio

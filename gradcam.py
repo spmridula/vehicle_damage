@@ -1,15 +1,3 @@
-# gradcam.py
-# Generate Grad-CAM heatmaps to explain WHERE in the car the model looked
-# when making a severity prediction.
-#
-# Grad-CAM = Gradient-weighted Class Activation Mapping
-# It shows which pixels most influenced the prediction by tracking
-# how gradients flow back through the last convolutional layer.
-#
-# Output: side-by-side image → original photo | heatmap overlay
-# This is the "explainability layer" — critical for insurance use cases
-# because you can show an adjuster exactly which damaged region drove the verdict.
-
 import os
 import numpy as np
 import matplotlib.pyplot as plt

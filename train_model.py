@@ -1,24 +1,3 @@
-# train_model.py
-# Fine-tune MobileNetV2 on car damage images to classify severity:
-#   0 = Minor   (scratches, small dents)
-#   1 = Moderate (bumper damage, cracked panels)
-#   2 = Severe   (airbag deployment, structural damage / total loss)
-#
-# Dataset: CarDD — Car Damage Detection (Kaggle)
-# https://www.kaggle.com/datasets/anujms/car-damage-detection
-# OR use the folder structure below with any car damage images you collect.
-#
-# Expected folder structure:
-#   data/
-#   ├── train/
-#   │   ├── minor/
-#   │   ├── moderate/
-#   │   └── severe/
-#   └── val/
-#       ├── minor/
-#       ├── moderate/
-#       └── severe/
-
 import os
 import numpy as np
 import matplotlib.pyplot as plt
