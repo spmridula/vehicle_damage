@@ -1,199 +1,146 @@
 import os
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-import tensorflow as tf
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+from PIL import Image
 import warnings
 warnings.filterwarnings("ignore")
 
-IMG_SIZE    = (224, 224)
+MODEL_PATH  = "vehicle_damage_model.pth"
 CLASS_NAMES = ["Minor Damage", "Moderate Damage", "Severe Damage"]
-MODEL_PATH  = "vehicle_damage_model.keras"
+IMG_SIZE    = 224
+DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MEAN = [0.485, 0.456, 0.406]
+STD  = [0.229, 0.224, 0.225]
 
 
-# ── CORE GRAD-CAM FUNCTION ────────────────────────────────────────────────────
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
-    """
-    How Grad-CAM works:
-    1. Pass image through model, intercept output of the last conv layer
-    2. Compute gradients of the predicted class score w.r.t. that layer's output
-    3. Pool the gradients spatially (global average pooling over each feature map)
-    4. Weight each feature map by its pooled gradient
-    5. Apply ReLU — we only care about features that increase the class score
-    6. The result is a heatmap showing which spatial regions drove the prediction
-
-    Why the LAST convolutional layer?
-    It has the highest-level semantic features (it "knows about" whole objects)
-    while still retaining spatial information (earlier layers have better spatial
-    resolution but lower-level features like edges, not semantic regions).
-    """
-    # Create a model that outputs:
-    # - the last conv layer's output (feature maps)
-    # - the final classification output
-    grad_model = tf.keras.models.Model(
-        inputs=model.inputs,
-        outputs=[
-            model.get_layer(last_conv_layer_name).output,
-            model.output
-        ]
+def load_model():
+    model = models.mobilenet_v2(weights=None)
+    in_features = model.classifier[1].in_features
+    model.classifier = nn.Sequential(
+        nn.Dropout(p=0.3),
+        nn.Linear(in_features, 3)
     )
-
-    with tf.GradientTape() as tape:
-        last_conv_output, preds = grad_model(img_array)
-        if pred_index is None:
-            pred_index = tf.argmax(preds[0])
-        class_channel = preds[:, pred_index]
-
-    # Gradients of predicted class w.r.t. last conv layer output
-    grads = tape.gradient(class_channel, last_conv_output)
-
-    # Pool gradients over spatial dimensions — one scalar per feature map
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-    # Weight feature maps by their importance score
-    last_conv_output = last_conv_output[0]
-    heatmap = last_conv_output @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-
-    # Normalize to [0, 1] and apply ReLU
-    heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-8)
-    return heatmap.numpy()
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    model = model.to(DEVICE)
+    model.eval()
+    return model
 
 
-def overlay_heatmap(img_path, heatmap, alpha=0.4):
-    """
-    Superimpose the Grad-CAM heatmap onto the original image.
-    Uses a jet colormap: blue=low activation, red=high activation.
-    """
-    # Load original image at display size
-    img = image.load_img(img_path, target_size=IMG_SIZE)
-    img_array = image.img_to_array(img)
-
-    # Resize heatmap to match image size
-    heatmap_resized = np.uint8(255 * heatmap)
-    jet = cm.get_cmap("jet")
-    jet_colors = jet(np.arange(256))[:, :3]
-    jet_heatmap = jet_colors[heatmap_resized]
-    jet_heatmap = tf.keras.utils.array_to_img(jet_heatmap)
-    jet_heatmap = jet_heatmap.resize((img_array.shape[1], img_array.shape[0]))
-    jet_heatmap = image.img_to_array(jet_heatmap)
-
-    # Blend: original image + heatmap overlay
-    superimposed = jet_heatmap * alpha + img_array * (1 - alpha)
-    superimposed = tf.keras.utils.array_to_img(superimposed)
-    return img_array, superimposed
+def preprocess(img_path):
+    tf = transforms.Compose([
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        transforms.ToTensor(),
+        transforms.Normalize(MEAN, STD)
+    ])
+    img = Image.open(img_path).convert("RGB")
+    return tf(img).unsqueeze(0).to(DEVICE), img
 
 
-def predict_and_explain(img_path, model, last_conv_layer_name="Conv_1", save_dir="gradcam_outputs"):
-    """
-    Full pipeline:
-    1. Preprocess image
-    2. Predict severity class + confidence scores
-    3. Generate Grad-CAM heatmap
-    4. Save side-by-side: original | heatmap overlay
-    """
+def make_gradcam_heatmap(model, img_tensor, pred_class_idx):
+    activations = {}
+    gradients   = {}
+    target_layer = model.features[18][0]
+
+    def forward_hook(module, input, output):
+        activations["value"] = output.detach()
+
+    def backward_hook(module, grad_input, grad_output):
+        gradients["value"] = grad_output[0].detach()
+
+    fh = target_layer.register_forward_hook(forward_hook)
+    bh = target_layer.register_backward_hook(backward_hook)
+
+    output = model(img_tensor)
+    model.zero_grad()
+    output[0, pred_class_idx].backward()
+    fh.remove()
+    bh.remove()
+
+    pooled_grads = gradients["value"].mean(dim=[0, 2, 3])
+    acts = activations["value"][0]
+    for i, w in enumerate(pooled_grads):
+        acts[i] *= w
+
+    heatmap = acts.mean(dim=0).cpu().numpy()
+    heatmap = np.maximum(heatmap, 0)
+    if heatmap.max() > 0:
+        heatmap /= heatmap.max()
+    return heatmap
+
+
+def overlay_heatmap(pil_img, heatmap, alpha=0.4):
+    img_array = np.array(pil_img.resize((IMG_SIZE, IMG_SIZE)), dtype=np.float32)
+    heatmap_large = np.array(
+        Image.fromarray(np.uint8(255 * heatmap)).resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR),
+        dtype=np.float32
+    ) / 255.0
+    jet_rgb = (cm.get_cmap("jet")(heatmap_large)[:, :, :3] * 255).astype(np.float32)
+    blended = np.clip(jet_rgb * alpha + img_array * (1 - alpha), 0, 255).astype(np.uint8)
+    return blended
+
+
+def predict_and_explain(img_path, model, save_dir="gradcam_outputs"):
     os.makedirs(save_dir, exist_ok=True)
+    img_tensor, pil_img = preprocess(img_path)
 
-    # Load and preprocess image
-    img = image.load_img(img_path, target_size=IMG_SIZE)
-    img_array = image.img_to_array(img)
-    img_array_norm = np.expand_dims(img_array / 255.0, axis=0)
+    with torch.no_grad():
+        logits = model(img_tensor)
+        probs  = torch.softmax(logits, dim=1)[0].cpu().numpy()
 
-    # Predict
-    preds = model.predict(img_array_norm, verbose=0)
-    pred_class_idx = np.argmax(preds[0])
-    pred_class_name = CLASS_NAMES[pred_class_idx]
-    confidence = preds[0][pred_class_idx] * 100
+    pred_idx   = int(np.argmax(probs))
+    pred_class = CLASS_NAMES[pred_idx]
+    confidence = probs[pred_idx] * 100
 
-    print(f"\nImage: {os.path.basename(img_path)}")
-    print(f"Prediction: {pred_class_name} ({confidence:.1f}% confidence)")
-    for i, (name, prob) in enumerate(zip(CLASS_NAMES, preds[0])):
+    print(f"\nImage   : {os.path.basename(img_path)}")
+    print(f"Verdict : {pred_class}  ({confidence:.1f}%)")
+    for name, prob in zip(CLASS_NAMES, probs):
         bar = "█" * int(prob * 20)
         print(f"  {name:20s}: {prob*100:5.1f}%  {bar}")
 
-    # Generate Grad-CAM
-    heatmap = make_gradcam_heatmap(img_array_norm, model, last_conv_layer_name, pred_class_idx)
-    original, overlaid = overlay_heatmap(img_path, heatmap)
+    heatmap  = make_gradcam_heatmap(model, img_tensor, pred_idx)
+    overlaid = overlay_heatmap(pil_img, heatmap)
 
-    # Save side-by-side visualization
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-    axes[0].imshow(original.astype("uint8"))
-    axes[0].set_title("Original Image", fontweight="bold")
-    axes[0].axis("off")
-
+    axes[0].imshow(pil_img.resize((IMG_SIZE, IMG_SIZE)))
+    axes[0].set_title("Original Image"); axes[0].axis("off")
     axes[1].imshow(overlaid)
-    axes[1].set_title("Grad-CAM Heatmap\n(Red = high influence)", fontweight="bold", color="darkred")
-    axes[1].axis("off")
-
-    # Bar chart of probabilities
+    axes[1].set_title("Grad-CAM  (red = model focus)"); axes[1].axis("off")
     colors = ["#2ecc71", "#f39c12", "#e74c3c"]
-    bars = axes[2].barh(CLASS_NAMES, preds[0] * 100, color=colors)
+    bars = axes[2].barh(CLASS_NAMES, probs * 100, color=colors, height=0.5)
     axes[2].set_xlabel("Confidence (%)")
-    axes[2].set_title(f"Prediction: {pred_class_name}\n({confidence:.1f}% confident)", fontweight="bold")
-    axes[2].set_xlim(0, 100)
-    for bar, val in zip(bars, preds[0] * 100):
+    axes[2].set_xlim(0, 105)
+    axes[2].set_title(f"{pred_class} — {confidence:.1f}%", fontweight="bold")
+    for bar, val in zip(bars, probs * 100):
         axes[2].text(val + 1, bar.get_y() + bar.get_height() / 2,
-                    f"{val:.1f}%", va="center", fontsize=10)
-
-    plt.suptitle(
-        f"Vehicle Damage Assessment — {pred_class_name}",
-        fontsize=14, fontweight="bold", y=1.02
-    )
+                     f"{val:.1f}%", va="center", fontsize=10)
+    axes[2].spines[["top", "right"]].set_visible(False)
+    plt.suptitle(f"Vehicle Damage — {pred_class}", fontsize=13, fontweight="bold")
     plt.tight_layout()
-
     save_name = os.path.splitext(os.path.basename(img_path))[0] + "_gradcam.png"
     save_path = os.path.join(save_dir, save_name)
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"Grad-CAM saved to: {save_path}")
-
-    return pred_class_name, confidence, save_path
-
-
-def find_last_conv_layer(model):
-    """
-    Automatically find the name of the last convolutional layer.
-    For MobileNetV2 this is typically 'Conv_1' but may vary.
-    """
-    for layer in reversed(model.layers):
-        if isinstance(layer, tf.keras.Model):
-            # It's the base model — find last conv inside it
-            for sublayer in reversed(layer.layers):
-                if isinstance(sublayer, tf.keras.layers.Conv2D):
-                    return layer.name + "/" + sublayer.name
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            return layer.name
-    return "Conv_1"  # MobileNetV2 default
+    print(f"Saved  : {save_path}")
 
 
 if __name__ == "__main__":
-    import sys
-
-    model = load_model(MODEL_PATH)
-    print(f"Model loaded from: {MODEL_PATH}")
-
-    # Find the last conv layer name automatically
-    # For MobileNetV2 the base model is the first layer
-    base_model = model.layers[0]
-    last_conv = "Conv_1"  # Standard MobileNetV2 last conv layer name
-    print(f"Using conv layer: {last_conv}")
-
-    # If an image path is passed as argument, explain that specific image
-    if len(sys.argv) > 1:
-        img_paths = sys.argv[1:]
-    else:
-        # Default: look for any images in current directory
-        img_paths = [f for f in os.listdir(".") if f.lower().endswith((".jpg", ".jpeg", ".png"))]
-        if not img_paths:
-            print("No images found. Pass image paths as arguments:")
-            print("  python gradcam.py car1.jpg car2.jpg")
-            exit()
-
-    for img_path in img_paths:
-        if os.path.exists(img_path):
-            predict_and_explain(img_path, model, last_conv_layer_name=last_conv)
+    if not os.path.exists(MODEL_PATH):
+        print(f"❌  {MODEL_PATH} not found. Run train_model.py first.")
+        sys.exit(1)
+    model = load_model()
+    print(f"✅  Model loaded from {MODEL_PATH}")
+    img_paths = sys.argv[1:] if len(sys.argv) > 1 else \
+        [f for f in os.listdir(".") if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+    if not img_paths:
+        print("Usage: python gradcam.py car1.jpg car2.jpg")
+        sys.exit(0)
+    for p in img_paths:
+        if os.path.exists(p):
+            predict_and_explain(p, model)
         else:
-            print(f"File not found: {img_path}")
+            print(f"Not found: {p}")
