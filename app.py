@@ -137,4 +137,4 @@ with gr.Blocks(title="Vehicle Damage Classifier", theme=gr.themes.Soft()) as dem
               outputs=[verdict_out, heatmap_out, chart_out])
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(share=True)
