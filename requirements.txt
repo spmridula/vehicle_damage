@@ -1,6 +1,6 @@
+torch
+torchvision
 numpy
 matplotlib
-tensorflow
+pillow
 gradio==4.7.1
-scikit-learn
-pillow 
