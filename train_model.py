@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import tensorflow as tf
@@ -16,7 +17,30 @@ EPOCHS      = 20           # EarlyStopping will stop this earlier if needed
 NUM_CLASSES = 3
 CLASS_NAMES = ["minor", "moderate", "severe"]
 DATA_DIR    = "data"
-MODEL_PATH  = "vehicle_damage_model.h5"
+MODEL_PATH  = "vehicle_damage_model.keras"
+
+def validate_dataset():
+    print("=== Validating dataset structure ===")
+    if not os.path.exists(DATA_DIR):
+        print(f"\n❌  Folder '{DATA_DIR}' not found in: {os.getcwd()}")
+        print("    Create: data/train/minor, data/train/moderate, data/train/severe")
+        print("    Create: data/val/minor, data/val/moderate, data/val/severe")
+        sys.exit(1)
+    errors = []
+    for split in ["train", "val"]:
+        for cls in CLASS_NAMES:
+            cls_path = os.path.join(DATA_DIR, split, cls)
+            if not os.path.exists(cls_path):
+                errors.append(f"Missing: {cls_path}")
+                continue
+            imgs = [f for f in os.listdir(cls_path) if f.lower().endswith((".jpg",".jpeg",".png"))]
+            if len(imgs) == 0:
+                errors.append(f"No images in: {cls_path}")
+            else:
+                print(f"  ✅  {cls_path} → {len(imgs)} images")
+    if errors:
+        print("\n❌  Errors:"); [print(f"    • {e}") for e in errors]; sys.exit(1)
+    print("✅  Dataset OK\n")
 
 
 # ── STEP 1: DATA LOADING WITH AUGMENTATION ───────────────────────────────────
@@ -170,6 +194,7 @@ def plot_history(history, save_path="training_curves.png"):
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    validate_dataset()
     print("=== Vehicle Damage Severity Classifier ===")
     print(f"TensorFlow version: {tf.__version__}")
 

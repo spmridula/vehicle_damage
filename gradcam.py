@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore")
 
 IMG_SIZE    = (224, 224)
 CLASS_NAMES = ["Minor Damage", "Moderate Damage", "Severe Damage"]
-MODEL_PATH  = "vehicle_damage_model.h5"
+MODEL_PATH  = "vehicle_damage_model.keras"
 
 
 # ── CORE GRAD-CAM FUNCTION ────────────────────────────────────────────────────

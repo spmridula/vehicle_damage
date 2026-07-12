@@ -14,7 +14,7 @@ warnings.filterwarnings("ignore")
 
 IMG_SIZE    = (224, 224)
 CLASS_NAMES = ["Minor Damage", "Moderate Damage", "Severe Damage"]
-MODEL_PATH  = "vehicle_damage_model.h5"
+MODEL_PATH  = "vehicle_damage_model.keras"
 
 # Descriptions for each damage class — explains the verdict to an adjuster
 CLASS_DESCRIPTIONS = {
@@ -173,10 +173,7 @@ with gr.Blocks(title="Vehicle Damage Severity Classifier", theme=gr.themes.Soft(
             analyze_btn = gr.Button("🔍 Analyze Damage", variant="primary", size="lg")
 
         with gr.Column(scale=1):
-            verdict_output = gr.Textbox(
-                label="Damage Assessment Report",
-                lines=18,
-                show_copy_button=True
+            verdict_out = gr.Textbox(label="Assessment Report", lines=16)
             )
 
     with gr.Row():
@@ -186,7 +183,7 @@ with gr.Blocks(title="Vehicle Damage Severity Classifier", theme=gr.themes.Soft(
     analyze_btn.click(
         fn=analyze_damage,
         inputs=img_input,
-        outputs=[verdict_output, heatmap_output, chart_output]
+        outputs=[verdict_out, heatmap_output, chart_output]
     )
 
     gr.Markdown("""
