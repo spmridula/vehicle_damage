@@ -1,199 +1,140 @@
+import os
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")  # non-interactive backend for Gradio
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-import tensorflow as tf
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
-import gradio as gr
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
 from PIL import Image
-import io
+import gradio as gr
 import warnings
 warnings.filterwarnings("ignore")
 
-IMG_SIZE    = (224, 224)
+MODEL_PATH  = "vehicle_damage_model.pth"
 CLASS_NAMES = ["Minor Damage", "Moderate Damage", "Severe Damage"]
-MODEL_PATH  = "vehicle_damage_model.keras"
+IMG_SIZE    = 224
+DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MEAN = [0.485, 0.456, 0.406]
+STD  = [0.229, 0.224, 0.225]
 
-# Descriptions for each damage class — explains the verdict to an adjuster
 CLASS_DESCRIPTIONS = {
-    "Minor Damage": (
-        "Surface-level damage only. Scratches, small dents, paint chips. "
-        "Typically repaired without panel replacement. "
-        "Estimated repair cost: ₹5,000 – ₹25,000"
-    ),
-    "Moderate Damage": (
-        "Structural panel damage. Bumper cracks, broken lights, door deformation. "
-        "Panel replacement likely needed. "
-        "Estimated repair cost: ₹25,000 – ₹1,50,000"
-    ),
-    "Severe Damage": (
-        "Major structural or mechanical damage. Frame damage, airbag deployment, "
-        "engine compartment involved. May be a total loss. "
-        "Estimated repair cost: ₹1,50,000+ or total loss declaration"
-    )
+    "Minor Damage":    "Surface scratches, small dents, paint chips. Est: ₹5,000–₹25,000",
+    "Moderate Damage": "Bumper cracks, broken lights, door deformation. Est: ₹25,000–₹1,50,000",
+    "Severe Damage":   "Frame/airbag/engine damage. Possible total loss. Est: ₹1,50,000+"
 }
+EMOJI = {"Minor Damage": "🟢", "Moderate Damage": "🟡", "Severe Damage": "🔴"}
 
-SEVERITY_EMOJI = {
-    "Minor Damage":    "🟢",
-    "Moderate Damage": "🟡",
-    "Severe Damage":   "🔴"
-}
-
-# Load model once at startup
 print("Loading model...")
 try:
-    model = load_model(MODEL_PATH)
-    print("Model loaded successfully.")
+    model = models.mobilenet_v2(weights=None)
+    in_features = model.classifier[1].in_features
+    model.classifier = nn.Sequential(nn.Dropout(p=0.3), nn.Linear(in_features, 3))
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    model = model.to(DEVICE)
+    model.eval()
+    print("✅  Model loaded.")
 except Exception as e:
-    print(f"Could not load model: {e}")
-    print("Train the model first: python train_model.py")
+    print(f"❌  Could not load model: {e}\n    Run train_model.py first.")
     model = None
 
+tf = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(MEAN, STD)
+])
 
-def make_gradcam_heatmap(img_array_norm, model):
-    """Generate Grad-CAM heatmap from normalized image array."""
-    # Get the MobileNetV2 base model (first layer in Sequential)
-    base_model = model.layers[0]
 
-    # Build grad model intercepting the last conv layer of MobileNetV2
-    grad_model = tf.keras.models.Model(
-        inputs=model.inputs,
-        outputs=[base_model.get_layer("Conv_1").output, model.output]
-    )
-
-    with tf.GradientTape() as tape:
-        conv_output, preds = grad_model(img_array_norm)
-        pred_index = tf.argmax(preds[0])
-        class_channel = preds[:, pred_index]
-
-    grads = tape.gradient(class_channel, conv_output)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-    conv_output = conv_output[0]
-    heatmap = conv_output @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-    heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-8)
-    return heatmap.numpy(), int(pred_index)
+def make_gradcam(model, img_tensor, pred_idx):
+    activations, gradients = {}, {}
+    target_layer = model.features[18][0]
+    fh = target_layer.register_forward_hook(
+        lambda m, i, o: activations.update({"v": o.detach()}))
+    bh = target_layer.register_backward_hook(
+        lambda m, gi, go: gradients.update({"v": go[0].detach()}))
+    out = model(img_tensor)
+    model.zero_grad()
+    out[0, pred_idx].backward()
+    fh.remove(); bh.remove()
+    pooled = gradients["v"].mean(dim=[0, 2, 3])
+    acts   = activations["v"][0]
+    for i, w in enumerate(pooled):
+        acts[i] *= w
+    heatmap = acts.mean(dim=0).cpu().numpy()
+    heatmap = np.maximum(heatmap, 0)
+    if heatmap.max() > 0:
+        heatmap /= heatmap.max()
+    return heatmap
 
 
 def analyze_damage(uploaded_image):
-    """
-    Main function called by Gradio when user uploads an image.
-    Returns: verdict text, annotated image with heatmap, confidence chart
-    """
     if model is None:
         return "❌ Model not loaded. Run train_model.py first.", None, None
-
     if uploaded_image is None:
         return "Please upload a car damage image.", None, None
 
-    # Preprocess
-    img = uploaded_image.resize(IMG_SIZE)
-    img_array = np.array(img)
-    if img_array.shape[-1] == 4:  # handle RGBA images
-        img_array = img_array[:, :, :3]
-    img_array_norm = np.expand_dims(img_array / 255.0, axis=0).astype(np.float32)
+    pil_img    = uploaded_image.convert("RGB")
+    img_tensor = tf(pil_img).unsqueeze(0).to(DEVICE)
 
-    # Predict
-    preds = model.predict(img_array_norm, verbose=0)[0]
-    pred_idx = int(np.argmax(preds))
+    with torch.no_grad():
+        logits = model(img_tensor)
+        probs  = torch.softmax(logits, dim=1)[0].cpu().numpy()
+
+    pred_idx   = int(np.argmax(probs))
     pred_class = CLASS_NAMES[pred_idx]
-    confidence = float(preds[pred_idx]) * 100
+    confidence = probs[pred_idx] * 100
 
-    # Generate Grad-CAM
     try:
-        heatmap, _ = make_gradcam_heatmap(img_array_norm, model)
-
-        # Overlay heatmap on original image
-        heatmap_resized = np.uint8(255 * heatmap)
-        jet = cm.get_cmap("jet")
-        jet_colors = jet(np.arange(256))[:, :3]
-        jet_heatmap = jet_colors[heatmap_resized]
-        jet_heatmap_img = Image.fromarray(np.uint8(jet_heatmap * 255)).resize(IMG_SIZE)
-        jet_array = np.array(jet_heatmap_img, dtype=np.float32)
-        blended = jet_array * 0.4 + img_array * 0.6
-        blended = np.clip(blended, 0, 255).astype(np.uint8)
-        overlay_img = Image.fromarray(blended)
+        heatmap  = make_gradcam(model, img_tensor, pred_idx)
+        img_arr  = np.array(pil_img.resize((IMG_SIZE, IMG_SIZE)), dtype=np.float32)
+        hm_large = np.array(
+            Image.fromarray(np.uint8(255 * heatmap)).resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR),
+            dtype=np.float32) / 255.0
+        jet_rgb  = (cm.get_cmap("jet")(hm_large)[:, :, :3] * 255).astype(np.float32)
+        overlay  = Image.fromarray(np.clip(jet_rgb * 0.4 + img_arr * 0.6, 0, 255).astype(np.uint8))
     except Exception:
-        overlay_img = img  # fallback: just show original if Grad-CAM fails
+        overlay = pil_img.resize((IMG_SIZE, IMG_SIZE))
 
-    # Build verdict text
-    emoji = SEVERITY_EMOJI[pred_class]
-    desc = CLASS_DESCRIPTIONS[pred_class]
-    verdict = f"""
-{emoji} DAMAGE ASSESSMENT VERDICT
-{'━' * 40}
-Severity Class  : {pred_class}
-Confidence      : {confidence:.1f}%
+    verdict = (
+        f"{EMOJI[pred_class]} DAMAGE ASSESSMENT\n"
+        f"{'━'*36}\n"
+        f"Severity  : {pred_class}\n"
+        f"Confidence: {confidence:.1f}%\n\n"
+        f"{CLASS_DESCRIPTIONS[pred_class]}\n\n"
+        f"{'━'*36}\n"
+        f"  🟢 Minor    : {probs[0]*100:.1f}%\n"
+        f"  🟡 Moderate : {probs[1]*100:.1f}%\n"
+        f"  🔴 Severe   : {probs[2]*100:.1f}%\n"
+        f"{'━'*36}\n"
+        f"⚠️  Human review required."
+    )
 
-Assessment      : {desc}
-
-{'━' * 40}
-Confidence Breakdown:
-  🟢 Minor     : {preds[0]*100:.1f}%
-  🟡 Moderate  : {preds[1]*100:.1f}%
-  🔴 Severe    : {preds[2]*100:.1f}%
-{'━' * 40}
-⚠️  Model recommendation only. Human adjuster review required for final claim decision.
-    """.strip()
-
-    # Confidence bar chart
     fig, ax = plt.subplots(figsize=(6, 3))
     colors = ["#2ecc71", "#f39c12", "#e74c3c"]
-    bars = ax.barh(CLASS_NAMES, preds * 100, color=colors, edgecolor="white", height=0.5)
-    ax.set_xlabel("Confidence (%)", fontsize=11)
-    ax.set_xlim(0, 105)
-    ax.set_title(f"Prediction: {pred_class}  ({confidence:.1f}% confident)",
-                 fontweight="bold", fontsize=12)
-    for bar, val in zip(bars, preds * 100):
+    bars = ax.barh(CLASS_NAMES, probs * 100, color=colors, height=0.5)
+    ax.set_xlabel("Confidence (%)"); ax.set_xlim(0, 105)
+    ax.set_title(f"{pred_class} — {confidence:.1f}%", fontweight="bold")
+    for bar, val in zip(bars, probs * 100):
         ax.text(val + 1, bar.get_y() + bar.get_height() / 2,
                 f"{val:.1f}%", va="center", fontsize=10, fontweight="bold")
     ax.spines[["top", "right"]].set_visible(False)
     plt.tight_layout()
 
-    return verdict, overlay_img, fig
+    return verdict, overlay, fig
 
 
-# ── GRADIO UI ─────────────────────────────────────────────────────────────────
-with gr.Blocks(title="Vehicle Damage Severity Classifier", theme=gr.themes.Soft()) as demo:
-
-    gr.Markdown("""
-    # 🚗 Vehicle Damage Severity Classifier
-    ### AI-powered damage assessment for insurance claims processing
-    Upload a photo of a damaged vehicle. The model will:
-    - Classify damage severity: **Minor / Moderate / Severe**
-    - Show **Grad-CAM heatmap** highlighting which region drove the prediction
-    - Provide a **confidence breakdown** across all three classes
-    """)
-
+with gr.Blocks(title="Vehicle Damage Classifier", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🚗 Vehicle Damage Severity Classifier\nUpload a damaged car photo → instant assessment + Grad-CAM heatmap.")
     with gr.Row():
-        with gr.Column(scale=1):
-            img_input = gr.Image(type="pil", label="Upload Vehicle Photo")
-            analyze_btn = gr.Button("🔍 Analyze Damage", variant="primary", size="lg")
-
-        with gr.Column(scale=1):
-            verdict_out = gr.Textbox(label="Assessment Report", lines=16)
-            )
-
+        img_input = gr.Image(type="pil", label="Upload Vehicle Photo")
+        btn       = gr.Button("🔍 Analyze", variant="primary", size="lg")
+    verdict_out = gr.Textbox(label="Assessment Report", lines=16)
     with gr.Row():
-        heatmap_output = gr.Image(label="Grad-CAM Heatmap (Red = high influence region)")
-        chart_output   = gr.Plot(label="Confidence Score Breakdown")
-
-    analyze_btn.click(
-        fn=analyze_damage,
-        inputs=img_input,
-        outputs=[verdict_out, heatmap_output, chart_output]
-    )
-
-    gr.Markdown("""
-    ---
-    **How to read the Grad-CAM heatmap:**
-    Red/orange regions = areas the model focused on most when making its prediction.
-    This lets an adjuster verify the model is looking at actual damage, not background.
-
-    **Tech stack:** TensorFlow · MobileNetV2 (Transfer Learning) · Grad-CAM · Gradio
-    """)
+        heatmap_out = gr.Image(label="Grad-CAM (red = model focus)")
+        chart_out   = gr.Plot(label="Confidence Scores")
+    btn.click(fn=analyze_damage, inputs=img_input,
+              outputs=[verdict_out, heatmap_out, chart_out])
 
 if __name__ == "__main__":
-    demo.launch(share=False)
+    demo.launch()
