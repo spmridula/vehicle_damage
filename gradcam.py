@@ -79,7 +79,7 @@ def overlay_heatmap(pil_img, heatmap, alpha=0.4):
         Image.fromarray(np.uint8(255 * heatmap)).resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR),
         dtype=np.float32
     ) / 255.0
-    jet_rgb = (cm.get_cmap("jet")(heatmap_large)[:, :, :3] * 255).astype(np.float32)
+    jet_rgb = (plt.colormaps["jet"](heatmap_large)[:, :, :3] * 255).astype(np.float32)
     blended = np.clip(jet_rgb * alpha + img_array * (1 - alpha), 0, 255).astype(np.uint8)
     return blended
 

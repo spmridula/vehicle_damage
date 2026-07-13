@@ -91,7 +91,7 @@ def analyze_damage(uploaded_image):
         hm_large = np.array(
             Image.fromarray(np.uint8(255 * heatmap)).resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR),
             dtype=np.float32) / 255.0
-        jet_rgb  = (cm.get_cmap("jet")(hm_large)[:, :, :3] * 255).astype(np.float32)
+        jet_rgb  = (plt.colormaps["jet"](hm_large)[:, :, :3] * 255).astype(np.float32)
         overlay  = Image.fromarray(np.clip(jet_rgb * 0.4 + img_arr * 0.6, 0, 255).astype(np.uint8))
     except Exception:
         overlay = pil_img.resize((IMG_SIZE, IMG_SIZE))
@@ -137,4 +137,4 @@ with gr.Blocks(title="Vehicle Damage Classifier", theme=gr.themes.Soft()) as dem
               outputs=[verdict_out, heatmap_out, chart_out])
 
 if __name__ == "__main__":
-    demo.launch(share=True)
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
