@@ -102,6 +102,11 @@ C:\Users\Admin\AppData\Local\Programs\Python\Python311\python.exe -m venv .venv3
 ```powershell
 pip install -r requirements.txt
 ```
+(if necessary, upgrade gradio version 4.7.1 -> 4.44.1)
+
+```powershell  
+pip install gradio --upgrade
+```
 
 ### 3. Train the model
 
