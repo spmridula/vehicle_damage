@@ -172,3 +172,13 @@ gradio
 
 ---
 
+## Screenshots
+
+### Gradio Web Interface
+![App Demo](screenshots/app_demo.png)
+
+### Grad-CAM Heatmap Explanation
+![GradCAM](screenshots/gradcam_output.png)
+
+### Training Curves
+![Training](screenshots/training_curves.png)
