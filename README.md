@@ -29,8 +29,7 @@ This project was built in PyTorch instead of TensorFlow for three reasons:
 **1. Industry standard for research and production.**
 PyTorch is the framework used by Meta, Tesla, and most top AI research labs.
 The majority of recent papers (transformers, diffusion models, LLMs) release
-PyTorch code first. Knowing PyTorch is more transferable than TensorFlow for
-mid-to-senior level roles.
+PyTorch code first.
 
 **2. Python version compatibility.**
 TensorFlow does not support Python 3.12+ as of 2025. PyTorch supports all
@@ -41,7 +40,7 @@ no C compiler or build tools needed.
 PyTorch's dynamic computation graph means you write standard Python — no
 sessions, no graph compilation, no Keras abstraction layer. The training loop,
 Grad-CAM hooks, and data loading are all plain Python code you can read and
-debug line by line. This makes it easier to explain every part in an interview.
+debug line by line. 
 
 ---
 
